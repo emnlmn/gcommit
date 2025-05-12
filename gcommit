@@ -41,15 +41,25 @@ if [ ! -s "$TEMP_DIFF" ]; then
 fi
 
 FILES_CHANGED=$(git diff --cached --name-only)
-BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
-TICKET=$(echo "$BRANCH_NAME" | grep -Eo '[A-Z]+[-_][0-9]+' | head -n 1 || true)
 
-COMMIT_HISTORY=""
+# --- MODIFICHE INIZIANO QUI ---
+
 if git show-ref --quiet HEAD; then
+  # Ci sono commit, HEAD è valido
+  BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
   COMMIT_HISTORY=$(git log -n 3 --pretty=format:"%s")
 else
+  # Nessun commit ancora (es. primo commit del repo), HEAD è "unborn"
+  # git symbolic-ref --short HEAD ottiene il nome del ramo non ancora nato (es. main o master)
+  # Aggiungiamo un fallback a "main" se symbolic-ref dovesse fallire per qualche motivo imprevisto.
+  BRANCH_NAME=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
   COMMIT_HISTORY="(no previous commits)"
 fi
+
+TICKET=$(echo "$BRANCH_NAME" | grep -Eo '[A-Z]+[-_][0-9]+' | head -n 1 || true)
+
+# --- MODIFICHE FINISCONO QUI ---
+
 
 cat > "$TEMP_PROMPT" <<EOF
 You are an assistant that writes atomic, concise, and properly formatted git commit messages in English. 
