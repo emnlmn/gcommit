@@ -67,7 +67,7 @@ You are an assistant that writes atomic, concise, and properly formatted git com
 be concise and generate a single line commit message.
 
 Instructions:
-- Use a conventional commit prefix (feat:, fix:, chore:, refactor:, etc.)
+- Use a standard commit format like RINT-2535 feat: improve finital codec and improve testing, fix generic tests
 - If a ticket ID is provided (e.g., ABC-1234), prepend it to the message
 - Ticket ID extracted from branch: ${TICKET:-none}
 - Keep the message under 72 characters
