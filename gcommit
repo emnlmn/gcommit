@@ -101,8 +101,7 @@ JSON_PAYLOAD_FOR_API=$(jq -n --arg prompt_content "$PROMPT_CONTENT" \
     }
   ],
   "generationConfig": {
-    "temperature": 0.1,
-    "maxOutputTokens": 128,
+    "temperature": 0.2,
     "topK": 40,
     "topP": 0.95
   }
