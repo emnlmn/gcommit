@@ -14,10 +14,11 @@ fi
 
 TEMP_DIFF=$(mktemp)
 TEMP_PROMPT=$(mktemp)
+TEMP_PAYLOAD=$(mktemp)
 TEMP_API_RESPONSE_BODY=$(mktemp)
 
 cleanup() {
-  rm -f "$TEMP_DIFF" "$TEMP_PROMPT" "$TEMP_API_RESPONSE_BODY"
+  rm -f "$TEMP_DIFF" "$TEMP_PROMPT" "$TEMP_PAYLOAD" "$TEMP_API_RESPONSE_BODY"
 }
 trap cleanup EXIT
 
@@ -34,13 +35,41 @@ for arg in "$@"; do
   esac
 done
 
-git diff --cached > "$TEMP_DIFF"
-if [ ! -s "$TEMP_DIFF" ]; then
+FILES_CHANGED=$(git diff --cached --name-only)
+if [ -z "$FILES_CHANGED" ]; then
   echo "ℹ️ No staged changes to commit."
   exit 0
 fi
 
-FILES_CHANGED=$(git diff --cached --name-only)
+# Limit the context size per file to avoid "Argument list too long" and token waste
+MAX_DIFF_SIZE=100000 # 100KB
+MAX_TOTAL_DIFF_SIZE=500000 # 500KB
+
+: > "$TEMP_DIFF"
+for file in $FILES_CHANGED; do
+  DIFF_SIZE=$(git diff --cached -- "$file" | wc -c)
+  if [ "$DIFF_SIZE" -lt "$MAX_DIFF_SIZE" ]; then
+    git diff --cached -- "$file" >> "$TEMP_DIFF"
+  else
+    echo "⚠️ Skipping context for $file (diff too large: $DIFF_SIZE bytes)"
+    echo "--- $file (diff too large, context omitted) ---" >> "$TEMP_DIFF"
+  fi
+done
+
+TOTAL_DIFF_SIZE=$(wc -c < "$TEMP_DIFF" | tr -d ' ')
+if [ "$TOTAL_DIFF_SIZE" -gt "$MAX_TOTAL_DIFF_SIZE" ]; then
+  echo "⚠️ Total diff is too large ($TOTAL_DIFF_SIZE bytes), truncating to $MAX_TOTAL_DIFF_SIZE bytes to fit in token limit."
+  head -c "$MAX_TOTAL_DIFF_SIZE" "$TEMP_DIFF" > "${TEMP_DIFF}.tmp"
+  echo -e "\n\n... (diff truncated due to total length limits)" >> "${TEMP_DIFF}.tmp"
+  mv "${TEMP_DIFF}.tmp" "$TEMP_DIFF"
+fi
+
+FILES_CHANGED_STR="$FILES_CHANGED"
+FILES_CHANGED_SIZE=$(echo "$FILES_CHANGED_STR" | wc -c | tr -d ' ')
+if [ "$FILES_CHANGED_SIZE" -gt 20000 ]; then
+  FILES_CHANGED_STR=$(echo "$FILES_CHANGED_STR" | head -c 20000)
+  FILES_CHANGED_STR=$(printf "%s\n... (files list truncated)" "$FILES_CHANGED_STR")
+fi
 
 # --- MODIFICHE INIZIANO QUI ---
 
@@ -76,7 +105,7 @@ Recent commits:
 $COMMIT_HISTORY
 
 Files changed:
-$FILES_CHANGED
+$FILES_CHANGED_STR
 
 Staged changes with surrounding code context:
 $(cat "$TEMP_DIFF")
@@ -84,9 +113,7 @@ $(cat "$TEMP_DIFF")
 Write only the commit message:
 EOF
 
-PROMPT_CONTENT=$(cat "$TEMP_PROMPT")
-
-JSON_PAYLOAD_FOR_API=$(jq -n --arg prompt_content "$PROMPT_CONTENT" \
+JSON_PAYLOAD_FOR_API=$(jq -n --rawfile prompt_content "$TEMP_PROMPT" \
 '{
   "contents": [
     {
@@ -108,6 +135,8 @@ if [ -z "$JSON_PAYLOAD_FOR_API" ]; then
   exit 1
 fi
 
+echo "$JSON_PAYLOAD_FOR_API" > "$TEMP_PAYLOAD"
+
 ACCESS_TOKEN=$(gcloud auth print-access-token)
 if [ -z "$ACCESS_TOKEN" ]; then
   echo "❌ Error: Failed to get gcloud access token. Make sure you are authenticated."
@@ -118,19 +147,17 @@ if $DEBUG_MODE; then
   COUNT_TOKENS_API_URL="https://${GGIT_LOCATION}-aiplatform.googleapis.com/v1/projects/${GGIT_PROJECT}/locations/${GGIT_LOCATION}/publishers/google/models/${GGIT_MODEL_ID}:countTokens"
   
   # Usiamo lo stesso payload, ma l'API countTokens ignorerà generationConfig
-  # Alcune API potrebbero richiedere un payload leggermente diverso per countTokens,
-  # ma per Gemini su Vertex AI, il payload di generateContent è solitamente accettato.
-  # Rimuoviamo generationConfig per essere più precisi se l'API lo preferisse
-  JSON_PAYLOAD_FOR_COUNT_TOKENS=$(echo "$JSON_PAYLOAD_FOR_API" | jq 'del(.generationConfig)')
-
+  JSON_PAYLOAD_FOR_COUNT_TOKENS=$(jq 'del(.generationConfig)' "$TEMP_PAYLOAD")
+  echo "$JSON_PAYLOAD_FOR_COUNT_TOKENS" > "$TEMP_PAYLOAD.tokens"
 
   TOKEN_COUNT_HTTP_STATUS=$(curl -s -X POST \
     -H "Authorization: Bearer ${ACCESS_TOKEN}" \
     -H "Content-Type: application/json" \
     "${COUNT_TOKENS_API_URL}" \
-    -d "${JSON_PAYLOAD_FOR_COUNT_TOKENS}" \
+    -d @"$TEMP_PAYLOAD.tokens" \
     -o "${TEMP_API_RESPONSE_BODY}" \
     -w "%{http_code}")
+  rm -f "$TEMP_PAYLOAD.tokens"
 
   if [[ "$TOKEN_COUNT_HTTP_STATUS" -eq 200 ]]; then
     TOKEN_COUNT=$(jq -r '.totalTokens // "N/A"' "$TEMP_API_RESPONSE_BODY")
@@ -151,7 +178,7 @@ HTTP_STATUS_CODE=$(curl -s -X POST \
   -H "Authorization: Bearer ${ACCESS_TOKEN}" \
   -H "Content-Type: application/json" \
   "${API_ENDPOINT_URL}" \
-  -d "${JSON_PAYLOAD_FOR_API}" \
+  -d @"$TEMP_PAYLOAD" \
   -o "${TEMP_API_RESPONSE_BODY}" \
   -w "%{http_code}")
 
